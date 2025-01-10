@@ -19,8 +19,8 @@
     - https://github.com/gracehermkens/cs283
 
 4. Briefly describe what you want to get out of this class.
-    - I want to be able to learn more about how we as programmers interact with systems themselves. I also want to learn more about systems architecture, networking, and more. 
+    - I want to be able to learn more about how we as programmers interact with systems themselves. I also want to learn more about systems architecture, networking, and more. I am really excited to get to work with virtual machines and just getting to expand my knowledge about computers.  
 
 
 5. Briefly describe any concerns you might be having with being successful in this class (if any).
-    - I am concerned with programming level. I definitely need more practice in C and in general, so I hope that doesn't hinder my learning and progress in the class. However, I am dedicated to working on it. 
+    - I am concerned with my programming level. I definitely need more practice in C and in general, so I hope that doesn't hinder my learning and progress in the class. However, I am dedicated to working on it. 
