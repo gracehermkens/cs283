@@ -28,7 +28,6 @@ EOF
 @test "dragon command prints dragon art" {
   run bash -c 'echo "dragon" | ./dsh'
   [ "$status" -eq 0 ]
-  # Check that the output contains a part of the ASCII art.
   [[ "$output" =~ "@%%%%" ]]
 }
 
