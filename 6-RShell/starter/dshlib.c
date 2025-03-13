@@ -450,70 +450,72 @@ int free_cmd_list(command_list_t *clist) {
 int exec_local_cmd_loop() {
     char line[SH_CMD_MAX];
     int rc = OK;
-    command_list_t cmd_list = {0};;
+    command_list_t cmd_list = {0};
 
-    cmd_list.num = 0;
-    
     while (1) {
         printf("%s", SH_PROMPT);
-
         if (fgets(line, SH_CMD_MAX, stdin) == NULL) {
             printf("\n");
             break;
         }
-
         line[strcspn(line, "\n")] = '\0';
-        
         if (strlen(line) == 0) {
             printf(CMD_WARN_NO_CMD);
             continue;
         }
 
-        char line_copy[SH_CMD_MAX];
-        strcpy(line_copy, line);
-
-        rc = build_cmd_list(line_copy, &cmd_list);
-        
-        if (rc == WARN_NO_CMDS) {
-            printf(CMD_WARN_NO_CMD);
-            continue;
-        } 
-        
-        else if (rc == ERR_TOO_MANY_COMMANDS) {
-            fprintf(stderr, CMD_ERR_PIPE_LIMIT, CMD_MAX);
-            continue;
-        } 
-        
-        else if (rc != OK) {
-            fprintf(stderr, "Error parsing command.\n");
-            continue;
-        }
-
-        if (cmd_list.num == 1 && 
-            strcmp(cmd_list.commands[0].argv[0], EXIT_CMD) == 0) {
-            printf("exiting...\n");
-            clear_command_list(&cmd_list);
-            break;
-        }
-
-        if (cmd_list.num == 1) {
-            Built_In_Cmds bi = match_command(cmd_list.commands[0].argv[0]);
-            if (bi != BI_NOT_BI) {
-                exec_built_in_cmd(&cmd_list.commands[0]);
-                clear_command_list(&cmd_list);
+        char *cmd_str = strtok(line, ";");
+        while (cmd_str != NULL) {
+            while (isspace(*cmd_str)) cmd_str++;
+            if (strlen(cmd_str) == 0) {
+                cmd_str = strtok(NULL, ";");
                 continue;
             }
-        }
+            
+            char line_copy[SH_CMD_MAX];
+            strncpy(line_copy, cmd_str, SH_CMD_MAX);
+            line_copy[SH_CMD_MAX-1] = '\0';
 
-        rc = execute_pipeline(&cmd_list);
-        last_exit_code = rc;
-        
-        if (rc != 0) {
-            fprintf(stderr, CMD_ERR_EXECUTE);
-        }
+            rc = build_cmd_list(line_copy, &cmd_list);
+            if (rc == WARN_NO_CMDS) {
+                printf(CMD_WARN_NO_CMD);
+                cmd_str = strtok(NULL, ";");
+                continue;
+            } else if (rc == ERR_TOO_MANY_COMMANDS) {
+                fprintf(stderr, CMD_ERR_PIPE_LIMIT, CMD_MAX);
+                cmd_str = strtok(NULL, ";");
+                continue;
+            } else if (rc != OK) {
+                fprintf(stderr, "Error parsing command.\n");
+                cmd_str = strtok(NULL, ";");
+                continue;
+            }
 
-        clear_command_list(&cmd_list);
+            if (cmd_list.num == 1 && 
+                strcmp(cmd_list.commands[0].argv[0], EXIT_CMD) == 0) {
+                printf("exiting...\n");
+                clear_command_list(&cmd_list);
+                exit(0);
+            }
+
+            if (cmd_list.num == 1) {
+                Built_In_Cmds bi = match_command(cmd_list.commands[0].argv[0]);
+                if (bi != BI_NOT_BI) {
+                    exec_built_in_cmd(&cmd_list.commands[0]);
+                    clear_command_list(&cmd_list);
+                    cmd_str = strtok(NULL, ";");
+                    continue;
+                }
+            }
+
+            rc = execute_pipeline(&cmd_list);
+            last_exit_code = rc;
+            if (rc != 0) {
+                fprintf(stderr, CMD_ERR_EXECUTE);
+            }
+            clear_command_list(&cmd_list);
+            cmd_str = strtok(NULL, ";");
+        }
     }
-    
     return last_exit_code;
 }

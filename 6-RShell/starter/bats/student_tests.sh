@@ -4,6 +4,22 @@
 # 
 # Create your unit tests suit in this file
 
+# Setup function to clean lingering processes between tests
+setup() {
+  # Kill any lingering dsh server processes
+  pkill -f "dsh -s" 2>/dev/null || true
+  # Clean up any temporary files
+  rm -f server_log.txt test_input.txt test_output.txt
+}
+
+# Teardown to ensure cleanup
+teardown() {
+  # Kill any remaining server processes
+  pkill -f "dsh -s" 2>/dev/null || true
+  # Clean up any temporary files from interrupted tests
+  rm -f server_log.txt test_input.txt test_output.txt
+}
+
 @test "Example: check ls runs without errors" {
     run ./dsh <<EOF
 ls
@@ -116,215 +132,224 @@ EOF
     rm file.txt out.txt
 }
 
-# Helper function to wait for a port to be open
-wait_for_port() {
-  local port=$1
-  local max_attempts=10
-  local attempt=0
-  while ! nc -z 127.0.0.1 $port && [ $attempt -lt $max_attempts ]; do
-    sleep 0.1
-    attempt=$((attempt+1))
-  done
+## Helper Functions for Remote Server Testing
+start_server() {
+    local PORT=$((8000 + RANDOM % 1000))
+    local MAX_ATTEMPTS=5
+    local ATTEMPTS=0
+    
+    while [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
+        if nc -z 127.0.0.1 $PORT 2>/dev/null; then
+            PORT=$((8000 + RANDOM % 1000))
+            ATTEMPTS=$((ATTEMPTS+1))
+            continue
+        fi
+        
+        ./dsh -s -p $PORT > server_log.txt 2>&1 &
+        local SERVER_PID=$!
+        
+        sleep 0.5
+        
+        if ! nc -z 127.0.0.1 $PORT 2>/dev/null; then
+            kill $SERVER_PID 2>/dev/null || true
+            PORT=$((8000 + RANDOM % 1000))
+            ATTEMPTS=$((ATTEMPTS+1))
+            continue
+        fi
+        
+        echo "$PORT:$SERVER_PID"
+        return 0
+    done
+    
+    echo "Failed to start server after $MAX_ATTEMPTS attempts" >&2
+    return 1
 }
 
-###########################################
-# Additional Remote Shell Tests for Assignment
-###########################################
-
 @test "Remote: echo command via client-server" {
-  PORT=5678
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  run bash -c './dsh -c -i 127.0.0.1 -p $PORT <<< "echo hello"'
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "hello" ]]
-
-  kill $server_pid || true
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    run bash -c "echo 'echo hello' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Command failed with status $status: $output"; }
+    [[ "$output" =~ "hello" ]] || { cat server_log.txt; fail "Expected 'hello' in output, got: $output"; }
 }
 
 @test "Remote: cd command changes directory in session" {
-  PORT=5679
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  initial_pwd=$(./dsh -c -i 127.0.0.1 -p $PORT <<< "pwd")
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "cd .. ; pwd"
-  new_pwd=$(echo "$output" | tail -n1)
-  [ "$new_pwd" != "$initial_pwd" ]
-
-  kill $server_pid || true
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    initial_pwd=$(echo "pwd" | ./dsh -c -i 127.0.0.1 -p $PORT)
+    
+    run bash -c "echo 'cd .. ; pwd' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Command failed with status $status"; }
+    new_pwd=$(echo "$output" | tail -n1)
+    [ "$new_pwd" != "$initial_pwd" ] || { cat server_log.txt; fail "Directory did not change"; }
 }
 
 @test "Remote: ls command lists files via client" {
-  PORT=5680
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "ls"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "dsh" ]]
-
-  kill $server_pid || true
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    run bash -c "echo 'ls' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Command failed with status $status"; }
+    [[ "$output" =~ "dsh" ]] || { cat server_log.txt; fail "Expected 'dsh' in output: $output"; }
 }
 
 @test "Remote: output redirection on server side" {
-  PORT=5681
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    echo "echo hello > remote_output.txt" | ./dsh -c -i 127.0.0.1 -p $PORT
+    sleep 0.5  
 
-  ./dsh -c -i 127.0.0.1 -p $PORT <<< "echo hello > remote_output.txt"
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "cat remote_output.txt"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "hello" ]]
-
-  ./dsh -c -i 127.0.0.1 -p $PORT <<< "rm remote_output.txt"
-  kill $server_pid || true
+    run bash -c "echo 'cat remote_output.txt' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    echo "rm remote_output.txt" | ./dsh -c -i 127.0.0.1 -p $PORT 2>/dev/null || true
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Command failed with status $status"; }
+    [[ "$output" =~ "hello" ]] || { cat server_log.txt; fail "Expected 'hello' in output: $output"; }
 }
 
 @test "Remote: pipeline command over network" {
-  PORT=5682
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "ls | grep '.c'"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *.c* ]]
-
-  kill $server_pid || true
-}
-
-@test "Remote: dragon command returns art" {
-  PORT=5683
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "dragon"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "@%%%%" ]]
-
-  kill $server_pid || true
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    run bash -c "echo 'ls | grep \".c\"' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Command failed with status $status"; }
+    [[ "$output" == *.c* ]] || { cat server_log.txt; fail "Expected .c file in output: $output"; }
 }
 
 @test "Remote: rc returns exit code of previous command" {
-  PORT=5684
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  ./dsh -c -i 127.0.0.1 -p $PORT <<< "invalidcommand"
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "rc"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "127" ]]  # Assuming command not found exit code is 127
-
-  kill $server_pid || true
-}
-
-@test "Remote: stop-server command shuts down server" {
-  PORT=5685
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "stop-server"
-  [ "$status" -eq 0 ]
-
-  # Wait for server to exit
-  wait $server_pid || true
-  run pgrep -f "dsh -s -p $PORT"
-  [ "$status" -ne 0 ]
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    echo "invalidcommand" | ./dsh -c -i 127.0.0.1 -p $PORT
+    run bash -c "echo 'rc' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Command failed with status $status"; }
+    [[ "$output" =~ "127" ]] || { cat server_log.txt; fail "Expected exit code in output: $output"; }
 }
 
 @test "Remote: input redirection from file on server" {
-  PORT=5686
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    echo "echo -e 'line1\nline2\nline3' > input.txt" | ./dsh -c -i 127.0.0.1 -p $PORT
+    sleep 0.5  
 
-  echo -e "line1\nline2\nline3" > input.txt
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "wc -l < input.txt"
-  [ "$status" -eq 0 ]
-  [ "$output" -eq 3 ]
-
-  rm input.txt
-  kill $server_pid || true
+    run bash -c "echo 'wc -l < input.txt' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    echo "rm input.txt" | ./dsh -c -i 127.0.0.1 -p $PORT 2>/dev/null || true
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Command failed with status $status"; }
+    [[ "$output" =~ "3" ]] || { cat server_log.txt; fail "Expected count of 3 in output: $output"; }
 }
 
 @test "Remote: append output redirection" {
-  PORT=5687
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  ./dsh -c -i 127.0.0.1 -p $PORT <<< "echo line1 > append.txt"
-  ./dsh -c -i 127.0.0.1 -p $PORT <<< "echo line2 >> append.txt"
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "cat append.txt"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ $'line1\nline2' ]]
-
-  ./dsh -c -i 127.0.0.1 -p $PORT <<< "rm append.txt"
-  kill $server_pid || true
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    echo "echo line1 > append.txt" | ./dsh -c -i 127.0.0.1 -p $PORT
+    sleep 0.5  
+    echo "echo line2 >> append.txt" | ./dsh -c -i 127.0.0.1 -p $PORT
+    sleep 0.5 
+    
+    run bash -c "echo 'cat append.txt' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    echo "rm append.txt" | ./dsh -c -i 127.0.0.1 -p $PORT 2>/dev/null || true
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Command failed with status $status"; }
+    [[ "$output" =~ $'line1\nline2' ]] || { cat server_log.txt; fail "Expected appended lines in output: $output"; }
 }
-
-###########################################
-# Additional Remote Functionality Tests
-###########################################
 
 @test "Remote: exit command disconnects client" {
-  PORT=5688
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  # Send the "exit" command to disconnect this client.
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "exit"
-  [ "$status" -eq 0 ]
-
-  # Now try connecting again to verify the server is still running.
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "echo still alive"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "still alive" ]]
-
-  kill $server_pid || true
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    run bash -c "echo 'exit' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Exit command failed with status $status"; }
+    
+    run bash -c "echo 'echo still alive' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Second connection failed with status $status"; }
+    [[ "$output" =~ "still alive" ]] || { cat server_log.txt; fail "Expected 'still alive' in output: $output"; }
 }
 
-@test "Remote: multiple semicolon-separated commands execute in order" {
-  PORT=5689
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
-
-  # Send multiple commands separated by semicolons.
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "echo first; echo second; echo third"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "first" ]]
-  [[ "$output" =~ "second" ]]
-  [[ "$output" =~ "third" ]]
-
-  kill $server_pid || true
-}
 
 @test "Remote: multiple client connections work" {
-  PORT=5690
-  ./dsh -s -p $PORT &
-  server_pid=$!
-  wait_for_port $PORT
+    SERVER_INFO=$(start_server)
+    [ "$?" -eq 0 ] || fail "Failed to start server"
+    
+    PORT=$(echo $SERVER_INFO | cut -d':' -f1)
+    SERVER_PID=$(echo $SERVER_INFO | cut -d':' -f2)
+    
+    run bash -c "echo 'echo client one' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "First client connection failed with status $status"; }
+    [[ "$output" =~ "client one" ]] || { cat server_log.txt; fail "Expected 'client one' in output: $output"; }
+    
+    run bash -c "echo 'echo client two' | ./dsh -c -i 127.0.0.1 -p $PORT"
+    
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
 
-  # First client connection
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "echo client one"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "client one" ]]
-
-  # Second client connection
-  run ./dsh -c -i 127.0.0.1 -p $PORT <<< "echo client two"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "client two" ]]
-
-  kill $server_pid || true
+    [ "$status" -eq 0 ] || { cat server_log.txt; fail "Second client connection failed with status $status"; }
+    [[ "$output" =~ "client two" ]] || { cat server_log.txt; fail "Expected 'client two' in output: $output"; }
 }

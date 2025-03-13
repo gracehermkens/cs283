@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <sys/un.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <ctype.h> 
 
 //INCLUDES for extra credit
 //#include <signal.h>
@@ -16,6 +18,7 @@
 #include "dshlib.h"
 #include "rshlib.h"
 
+static int last_exit_code_remote = 0;
 
 /*
  * start_server(ifaces, port, is_threaded)
@@ -63,8 +66,12 @@ int start_server(char *ifaces, int port, int is_threaded){
 
     stop_server(svr_socket);
 
+    if (rc == OK_EXIT) {
+        exit(0); 
+    }
+
     return rc;
-} 
+}
 
 /*
  * stop_server(svr_socket)
@@ -75,7 +82,12 @@ int start_server(char *ifaces, int port, int is_threaded){
  *      the socket.  
  */
 int stop_server(int svr_socket){
-    return close(svr_socket);
+    shutdown(svr_socket, SHUT_RDWR);
+    close(svr_socket);
+
+    exit(0);
+
+    return 0;
 }
 
 /*
@@ -208,11 +220,12 @@ int process_cli_requests(int svr_socket){
         rc = exec_client_requests(cli_socket);
     
         if (rc == OK_EXIT) {
-            break;
+            close(cli_socket);
+            break; 
         }
     }
 
-    return rc;
+    return rc; 
 }
 
 /*
@@ -261,7 +274,6 @@ int exec_client_requests(int cli_socket) {
     command_list_t cmd_list;
     int rc;
     int cmd_rc;
-    int last_rc;  
     char *io_buff;
 
     io_buff = malloc(RDSH_COMM_BUFF_SZ);
@@ -281,47 +293,72 @@ int exec_client_requests(int cli_socket) {
         
         io_buff[io_size] = '\0'; 
 
-        memset(&cmd_list, 0, sizeof(cmd_list));
-        rc = build_cmd_list(io_buff, &cmd_list);
+        char *cmd_token = strtok(io_buff, ";");
+        while(cmd_token != NULL) {
+            while(*cmd_token && isspace((unsigned char)*cmd_token)) cmd_token++;
+
+            char *end = cmd_token + strlen(cmd_token) - 1;
+            while(end >= cmd_token && isspace((unsigned char)*end)) end--;
+            *(end + 1) = '\0';
+
+            if(strlen(cmd_token) == 0) {
+                cmd_token = strtok(NULL, ";");
+                continue;
+            }
+
+            memset(&cmd_list, 0, sizeof(cmd_list));
+            rc = build_cmd_list(cmd_token, &cmd_list);
+            
+            if (rc != OK) {
+                char error_msg[100];
+                sprintf(error_msg, "Error parsing command: %d\n", rc);
+                send_message_string(cli_socket, error_msg);
+                send_message_eof(cli_socket);
+                cmd_token = strtok(NULL, ";");
+                continue;
+            }
+            
+            Built_In_Cmds bi_cmd = rsh_built_in_cmd(&cmd_list.commands[0]);
+            
+            if (bi_cmd == BI_CMD_EXIT) {
+                free_cmd_list(&cmd_list);
+                free(io_buff);
+                close(cli_socket);
+                return OK;
+            } else if (bi_cmd == BI_CMD_STOP_SVR) {
+                free_cmd_list(&cmd_list);
+                free(io_buff);
+                close(cli_socket);
+                return OK_EXIT;
+            } else if (bi_cmd == BI_CMD_RC) {
+                char rc_string[32];
+                sprintf(rc_string, "%d\n", last_exit_code_remote);
+                send_message_string(cli_socket, rc_string);
+                send_message_eof(cli_socket);
+                free_cmd_list(&cmd_list);
+                cmd_token = strtok(NULL, ";");
+                continue;
+            } else if (bi_cmd == BI_EXECUTED) {
+                send_message_eof(cli_socket);
+                free_cmd_list(&cmd_list);
+                cmd_token = strtok(NULL, ";");
+                continue;
+            }
+            
+            cmd_rc = rsh_execute_pipeline(cli_socket, &cmd_list);
+            last_exit_code_remote = cmd_rc; 
+            
+            if (cmd_rc != OK) {
+                char error_msg[100];
+                sprintf(error_msg, "Command execution failed with code: %d\n", cmd_rc);
+                send_message_string(cli_socket, error_msg);
+            }
         
-        if (rc != OK) {
-            char error_msg[100];
-            sprintf(error_msg, "Error parsing command: %d\n", rc);
-            send_message_string(cli_socket, error_msg);
-            continue;
-        }
-        
-        Built_In_Cmds bi_cmd = rsh_built_in_cmd(&cmd_list.commands[0]);
-        
-        if (bi_cmd == BI_CMD_EXIT) {
-            free_cmd_list(&cmd_list);
-            free(io_buff);
-            close(cli_socket);
-            return OK;
-        } else if (bi_cmd == BI_CMD_STOP_SVR) {
-            free_cmd_list(&cmd_list);
-            free(io_buff);
-            close(cli_socket);
-            return OK_EXIT;
-        } else if (bi_cmd == BI_EXECUTED) {
             send_message_eof(cli_socket);
             free_cmd_list(&cmd_list);
-            continue;
+            
+            cmd_token = strtok(NULL, ";");
         }
-
-        cmd_rc = rsh_execute_pipeline(cli_socket, &cmd_list);
-        last_rc = cmd_rc;
-        (void)last_rc;
-        
-        free_cmd_list(&cmd_list);
-        
-        if (cmd_rc != OK) {
-            char error_msg[100];
-            sprintf(error_msg, "Command execution failed with code: %d\n", cmd_rc);
-            send_message_string(cli_socket, error_msg);
-        }
-    
-        send_message_eof(cli_socket);
     }
 
     free(io_buff);
@@ -373,7 +410,6 @@ int send_message_eof(int cli_socket){
  *           we were unable to send the message followed by the EOF character. 
  */
 int send_message_string(int cli_socket, char *buff){
-    //TODO implement writing to cli_socket with send()
     int len = strlen(buff);
     int sent_len = send(cli_socket, buff, len, 0);
     
@@ -430,72 +466,96 @@ int rsh_execute_pipeline(int cli_sock, command_list_t *clist) {
     Built_In_Cmds bi_cmd;           
     int exit_code;
 
-    /* Dummy usage of bi_cmd */
+    int num = clist->num;  
+
     bi_cmd = BI_NOT_BI;
     (void)bi_cmd;
-
-    // Create all necessary pipes
-    for (int i = 0; i < clist->num - 1; i++) {
-        if (pipe(pipes[i]) == -1) {
+    
+    // Create necessary pipes.
+    for (int i = 0; i < num - 1; i++) {
+        if (pipe(pipes[i]) < 0) {
             perror("pipe");
             exit(EXIT_FAILURE);
         }
     }
 
-    for (int i = 0; i < clist->num; i++) {
+    for (int i = 0; i < num; i++) {
         pids[i] = fork();
-
         if (pids[i] < 0) {
             perror("fork");
             exit(EXIT_FAILURE);
         } else if (pids[i] == 0) {
             if (i == 0) {
-                dup2(cli_sock, STDIN_FILENO);
+                if (clist->commands[i].input_file != NULL) {
+                    int fd = open(clist->commands[i].input_file, O_RDONLY);
+                    if (fd < 0) {
+                        perror("open input");
+                        if (errno == ENOENT)
+                            exit(127);
+                        exit(errno);
+                    }
+                    dup2(fd, STDIN_FILENO);
+                    close(fd);
+                } else {
+                    dup2(cli_sock, STDIN_FILENO);
+                }
             } else {
-                dup2(pipes[i-1][0], STDIN_FILENO);
+                dup2(pipes[i - 1][0], STDIN_FILENO);
             }
-            
-            if (i < clist->num - 1) {
+
+            if (i < num - 1) {
                 dup2(pipes[i][1], STDOUT_FILENO);
             } else {
-                dup2(cli_sock, STDOUT_FILENO);
-                dup2(cli_sock, STDERR_FILENO);
+                if (clist->commands[i].output_file != NULL) {
+                    int flags = O_WRONLY | O_CREAT;
+                    flags |= clist->commands[i].append_mode ? O_APPEND : O_TRUNC;
+                    int fd = open(clist->commands[i].output_file, flags, 0644);
+                    if (fd < 0) {
+                        perror("open output");
+                        if (errno == ENOENT)
+                            exit(127);
+                        exit(errno);
+                    }
+                    dup2(fd, STDOUT_FILENO);
+                    close(fd);
+                } else {
+                    dup2(cli_sock, STDOUT_FILENO);
+                    dup2(cli_sock, STDERR_FILENO);
+                }
             }
-            
-            for (int j = 0; j < clist->num - 1; j++) {
+
+            for (int j = 0; j < num - 1; j++) {
                 close(pipes[j][0]);
                 close(pipes[j][1]);
             }
-        
+
             execvp(clist->commands[i].argv[0], clist->commands[i].argv);
-            
             perror("execvp");
-            exit(EXIT_FAILURE);
+            if (errno == ENOENT)
+                exit(127);
+            exit(errno);
         }
     }
 
-    // Parent process: close all pipe ends
-    for (int i = 0; i < clist->num - 1; i++) {
+    /// Parent: close all pipe file descriptors.
+    for (int i = 0; i < num - 1; i++) {
         close(pipes[i][0]);
         close(pipes[i][1]);
     }
 
-    // Wait for all children
-    for (int i = 0; i < clist->num; i++) {
+    // Wait for all children.
+    for (int i = 0; i < num; i++) {
         waitpid(pids[i], &pids_st[i], 0);
     }
 
-    // Get exit code from the last process in the pipeline
-    exit_code = WEXITSTATUS(pids_st[clist->num - 1]);
-
-    for (int i = 0; i < clist->num; i++) {
-        if (WEXITSTATUS(pids_st[i]) == EXIT_SC) {
-            exit_code = EXIT_SC;
-        }
-    }
+    if (WIFEXITED(pids_st[num - 1]))
+        exit_code = WEXITSTATUS(pids_st[num - 1]);
+    else
+        exit_code = ERR_EXEC_CMD;
 
     return exit_code;
 }
+
 
 /**************   OPTIONAL STUFF  ***************/
 /****
